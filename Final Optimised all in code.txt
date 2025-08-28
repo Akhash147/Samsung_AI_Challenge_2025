@@ -1,0 +1,956 @@
+package com.example.boostai
+
+import android.Manifest
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.Service
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
+import android.os.IBinder
+import android.util.Log
+import androidx.core.app.ActivityCompat
+import androidx.core.app.NotificationCompat
+import com.google.android.gms.location.*
+
+class GpsAccuracyService : Service() {
+
+    private lateinit var fusedClient: FusedLocationProviderClient
+    private lateinit var callback: LocationCallback
+
+    private val CHANNEL_ID = "gps_accuracy_channel"
+    private val NOTIFICATION_ID = 2001
+
+    private var lastMode = "UNKNOWN"
+
+    override fun onCreate() {
+        super.onCreate()
+
+        fusedClient = LocationServices.getFusedLocationProviderClient(this)
+
+        createNotificationChannel()
+        startForeground(NOTIFICATION_ID, buildNotification("Waiting for GPS data..."))
+
+        callback = object : LocationCallback() {
+            override fun onLocationResult(result: LocationResult) {
+                for (location in result.locations) {
+                    val speedKmh = location.speed * 3.6f   
+                    val accuracyM = location.accuracy      
+                    val mode = when {
+                        speedKmh >= 8f -> "HIGH ACCURACY MODE"
+                        accuracyM <= 40f -> "HIGH ACCURACY MODE"
+                        else -> "LOW ACCURACY MODE"
+                    }
+                    lastMode = mode
+                
+                    Log.d(
+                        "GpsAccuracyService",
+                        "Speed: ${"%.1f".format(speedKmh)} km/h | Accuracy: ${accuracyM.toInt()} m → $mode"
+                    )
+
+                   
+                    val notifText =
+                        "Speed: ${"%.1f".format(speedKmh)} km/h | Accuracy: ${accuracyM.toInt()} m"
+                    updateNotification("GPS $mode", notifText)
+                }
+            }
+        }
+
+        val request = LocationRequest.Builder(
+            Priority.PRIORITY_HIGH_ACCURACY,
+            1000L
+        ).setMinUpdateDistanceMeters(0f).build()
+
+        if (ActivityCompat.checkSelfPermission(
+                this,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
+        ) {
+            fusedClient.requestLocationUpdates(request, callback, mainLooper)
+        } else {
+            Log.e("GpsAccuracyService", "Location permission NOT granted!")
+            updateNotification("Permission Required", "Enable GPS permissions in settings")
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        fusedClient.removeLocationUpdates(callback)
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun buildNotification(content: String): Notification {
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("GPS Accuracy Service")
+            .setContentText(content)
+            .setSmallIcon(android.R.drawable.ic_menu_mylocation)
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .build()
+    }
+
+    private fun updateNotification(title: String, content: String) {
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle(title)
+            .setContentText(content)
+            .setSmallIcon(android.R.drawable.ic_menu_mylocation)
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .build()
+
+        val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        manager.notify(NOTIFICATION_ID, notification)
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "GPS Accuracy Channel",
+                NotificationManager.IMPORTANCE_LOW
+            )
+            val manager = getSystemService(NotificationManager::class.java)
+            manager.createNotificationChannel(channel)
+        }
+    }
+}
+
+GPS RECEIVER  Code :
+package com.example.boostai
+
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+
+class GpsReceiver(private val callback: (String) -> Unit) : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        val mode = intent.getStringExtra("gpsMode") ?: "UNKNOWN"
+        callback(mode)
+    }
+}
+package com.example.boostai
+
+import android.Manifest
+import android.annotation.SuppressLint
+import android.app.AppOpsManager
+import android.content.*
+import android.content.pm.PackageManager
+import android.location.LocationManager
+import android.net.Uri
+import android.os.Build
+import android.os.BatteryManager
+import android.os.Bundle
+import android.provider.Settings
+import android.util.Log
+import android.widget.Button
+import android.widget.TextView
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
+
+class MainActivity : AppCompatActivity() {
+
+    private lateinit var tvBattery: TextView
+    private lateinit var tvEstimated: TextView
+    private lateinit var tvOptimized: TextView
+    private lateinit var tvStatus: TextView
+    private lateinit var tvRealTime: TextView
+    private lateinit var btnOn: Button
+    private lateinit var btnOff: Button
+
+    companion object {
+        private const val LOCATION_PERMISSION_REQUEST = 100
+    }
+
+    private val twinReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == BatteryTelemetryService.ACTION_BATTERY_TWIN_UPDATE) {
+                val est = intent.getStringExtra(BatteryTelemetryService.EXTRA_ESTIMATED) ?: return
+                val opt = intent.getStringExtra(BatteryTelemetryService.EXTRA_OPTIMIZED) ?: return
+                tvEstimated.text = "Estimated Running Time: $est"
+                tvOptimized.text = "Optimized Running Time: $opt"
+            }
+        }
+    }
+
+    private val realtimeReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == "com.example.boostai.LUX_UPDATE") {
+                val lux = intent.getFloatExtra("currentLux", 0f)
+                tvRealTime.text = "Real-Time: Lux=${lux.toInt()} | GPS=--"
+            }
+            if (intent.action == "com.example.boostai.GPS_MODE_UPDATE") {
+                val gps = intent.getStringExtra("gpsMode") ?: "--"
+                val text = tvRealTime.text.toString()
+                tvRealTime.text = text.replaceAfter("| GPS=", gps)
+            }
+        }
+    }
+
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
+    override fun onStart() {
+        super.onStart()
+        registerReceiver(twinReceiver, IntentFilter(BatteryTelemetryService.ACTION_BATTERY_TWIN_UPDATE))
+        val filter = IntentFilter().apply {
+            addAction("com.example.boostai.LUX_UPDATE")
+            addAction("com.example.boostai.GPS_MODE_UPDATE")
+        }
+        registerReceiver(realtimeReceiver, filter)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        unregisterReceiver(twinReceiver)
+        unregisterReceiver(realtimeReceiver)
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+
+        tvBattery = findViewById(R.id.tvBatteryLevel)
+        tvEstimated = findViewById(R.id.tvEstimatedTime)
+        tvOptimized = findViewById(R.id.tvOptimizedTime)
+        tvStatus = findViewById(R.id.tvStatus)
+        tvRealTime = findViewById(R.id.tvRealTimeIndicators)
+        btnOn = findViewById(R.id.btnOn)
+        btnOff = findViewById(R.id.btnOff)
+
+        updateBatteryInfo()
+
+        btnOn.setOnClickListener {
+            when {
+                !hasUsageStatsPermission() -> startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+                !Settings.System.canWrite(this) -> {
+                    val intent = Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS)
+                    intent.data = Uri.parse("package:$packageName")
+                    startActivity(intent)
+                }
+                !hasLocationPermission() -> ActivityCompat.requestPermissions(
+                    this,
+                    arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION),
+                    LOCATION_PERMISSION_REQUEST
+                )
+                !isGpsEnabled() -> startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
+                else -> startAllServices()
+            }
+        }
+
+        btnOff.setOnClickListener { stopAllServices() }
+    }
+
+    private fun startAllServices() {
+        startService(Intent(this, BoostService::class.java))
+        startService(Intent(this, GpsAccuracyService::class.java))
+        startService(Intent(this, BatteryTelemetryService::class.java))
+        tvStatus.text = "Status: Optimization On"
+    }
+
+    private fun stopAllServices() {
+        stopService(Intent(this, BoostService::class.java))
+        stopService(Intent(this, GpsAccuracyService::class.java))
+        stopService(Intent(this, BatteryTelemetryService::class.java))
+        tvStatus.text = "Status: Optimization Off"
+    }
+
+    private fun updateBatteryInfo() {
+        val bm = getSystemService(BATTERY_SERVICE) as BatteryManager
+        val level = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+        tvBattery.text = "Battery Level: $level%"
+    }
+
+    private fun hasUsageStatsPermission(): Boolean {
+        val appOps = getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+        val mode = appOps.checkOpNoThrow(
+            AppOpsManager.OPSTR_GET_USAGE_STATS,
+            android.os.Process.myUid(),
+            packageName
+        )
+        return mode == AppOpsManager.MODE_ALLOWED
+    }
+
+    private fun hasLocationPermission(): Boolean {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun isGpsEnabled(): Boolean {
+        val lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        return lm.isProviderEnabled(LocationManager.GPS_PROVIDER)
+    }
+}
+package com.example.boostai
+
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.location.LocationManager
+import android.os.IBinder
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
+
+class SensorBroadcastService : Service() {
+
+    private lateinit var sensorManager: SensorManager
+    private var lightSensor: Sensor? = null
+    private val handler = Handler(Looper.getMainLooper())
+    private val updateInterval: Long = 5000L // 5 seconds
+
+    private val gpsRunnable = object : Runnable {
+        override fun run() {
+            sendGpsMode()
+            handler.postDelayed(this, updateInterval)
+        }
+    }
+
+    private val lightListener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent) {
+            val lux = event.values[0]
+            val intent = Intent().apply {
+                package = packageName
+                action = "com.example.boostai.LUX_UPDATE"
+                putExtra("currentLux", lux)
+            }
+            sendBroadcast(intent)
+            Log.d("SensorBroadcastService", "Lux Broadcast sent: $lux")
+        }
+
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+
+        sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        lightSensor = sensorManager.getDefaultSensor(Sensor.TYPE_LIGHT)
+
+        lightSensor?.let {
+            sensorManager.registerListener(lightListener, it, SensorManager.SENSOR_DELAY_NORMAL)
+        }
+
+        handler.post(gpsRunnable)
+        Log.d("SensorBroadcastService", "Service started")
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        sensorManager.unregisterListener(lightListener)
+        handler.removeCallbacks(gpsRunnable)
+        Log.d("SensorBroadcastService", "Service stopped")
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun sendGpsMode() {
+        val locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        val gpsMode = if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) "HIGH" else "LOW"
+
+        val intent = Intent().apply {
+            package = packageName
+            action = "com.example.boostai.GPS_MODE_UPDATE"
+            putExtra("gpsMode", gpsMode)
+        }
+        sendBroadcast(intent)
+        Log.d("SensorBroadcastService", "GPS Broadcast sent: $gpsMode")
+    }
+}
+package com.example.boostai
+
+import android.app.ActivityManager
+import android.content.Context
+
+object Utils {
+    fun isMapsRunning(context: Context): Boolean {
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        val running = am.runningAppProcesses ?: return false
+        return running.any { it.processName.contains("com.google.android.apps.maps") }
+    }
+}
+package com.example.boostai
+
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+
+class LuxReceiver(private val callback: (Float) -> Unit) : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        val lux = intent.getFloatExtra("currentLux", 0f)
+        callback(lux)
+    }
+} 
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    package="com.example.boostai">
+
+    <!-- Permissions -->
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
+
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <!-- Location -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+
+    <!-- System settings -->
+    <uses-permission android:name="android.permission.WRITE_SETTINGS" />
+
+    <!-- Notifications -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"
+        tools:targetApi="33" />
+
+    <!-- Network -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <application
+        android:allowBackup="true"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.AppCompat.Light.NoActionBar">
+
+        <!-- Main Activity -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+
+        <!-- Services -->
+        <service
+            android:name=".SensorBroadcastService"
+            android:exported="false" />
+
+        <service
+            android:name=".BatteryTelemetryService"
+            android:exported="false"
+            android:foregroundServiceType="location|dataSync" />
+
+        <service
+            android:name=".BoostService"
+            android:exported="false" />
+
+        <service
+            android:name=".GpsAccuracyService"
+            android:exported="false"
+            android:foregroundServiceType="location" />
+
+
+    </application>
+</manifest>~
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="20dp"
+    android:gravity="center"
+    android:background="#121212">
+
+    <TextView
+        android:id="@+id/tvBatteryLevel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Battery Level: --%"
+        android:textSize="20sp"
+        android:textColor="@android:color/white"
+        android:layout_marginBottom="10dp" />
+
+    <TextView
+        android:id="@+id/tvEstimatedTime"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Estimated Running Time: -- mins"
+        android:textSize="18sp"
+        android:textColor="@android:color/white"
+        android:layout_marginBottom="10dp" />
+
+    <TextView
+        android:id="@+id/tvOptimizedTime"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Optimized Running Time: --"
+        android:textSize="18sp"
+        android:textColor="@android:color/holo_green_light"
+        android:layout_marginBottom="10dp" />
+
+    <TextView
+        android:id="@+id/tvStatus"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Status: Idle"
+        android:textSize="18sp"
+        android:textColor="@android:color/holo_blue_light"
+        android:layout_marginBottom="20dp" />
+
+    <TextView
+        android:id="@+id/tvRealTimeIndicators"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Real-Time: Lux=-- | GPS=--"
+        android:textSize="16sp"
+        android:textColor="@android:color/holo_orange_light"
+        android:layout_marginBottom="20dp" />
+
+    <Button
+        android:id="@+id/btnOn"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Turn On Optimization"
+        android:backgroundTint="@android:color/holo_green_dark"
+        android:textColor="@android:color/white"
+        android:layout_marginBottom="10dp" />
+
+    <Button
+        android:id="@+id/btnOff"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Turn Off Optimization"
+        android:backgroundTint="@android:color/holo_red_dark"
+        android:textColor="@android:color/white" />
+
+</LinearLayout>
+BUILD.GRADLE.KTS(BOOSTAI) CODE : 
+plugins {
+    alias(libs.plugins.android.application) apply false
+    alias(libs.plugins.kotlin.android) apply false
+}
+BUILD.GRADLE.KTS(APP):
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+}
+
+android {
+    namespace = "com.example.boostai"
+    compileSdk = 34
+
+    defaultConfig {
+        applicationId = "com.example.boostai"
+        minSdk = 24
+        targetSdk = 34
+        versionCode = 1
+        versionName = "1.0"
+
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+}
+
+dependencies {
+    // AndroidX Core
+    implementation("androidx.core:core-ktx:1.13.1")
+
+    // Google Play Services - Location
+    implementation("com.google.android.gms:play-services-location:21.3.0")
+
+    // AppCompat & Material Components
+    implementation("androidx.appcompat:appcompat:1.7.0")
+    implementation("com.google.android.material:material:1.12.0")
+
+    // ConstraintLayout
+    implementation("androidx.constraintlayout:constraintlayout:2.1.4")
+
+    // Testing
+    testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
+}
+BATTERY PREDICTOR CODE :
+package com.example.boostai
+
+import android.content.Context
+import android.content.SharedPreferences
+import kotlin.math.max
+import kotlin.math.min
+
+enum class NetworkType { WIFI, CELL_4G, CELL_5G, UNKNOWN }
+
+class BatteryPredictor(context: Context) {
+
+    private val prefs: SharedPreferences =
+        context.getSharedPreferences("battery_predictor_prefs", Context.MODE_PRIVATE)
+
+    private var baseDrain: Double
+        get() = prefs.getDouble("baseDrain", 220.0)
+        set(v) = prefs.edit().putDouble("baseDrain", v).apply()
+
+    private var gpsHigh: Double
+        get() = prefs.getDouble("gpsHigh", 120.0)
+        set(v) = prefs.edit().putDouble("gpsHigh", v).apply()
+
+    private var gpsLow: Double
+        get() = prefs.getDouble("gpsLow", 35.0)
+        set(v) = prefs.edit().putDouble("gpsLow", v).apply()
+
+    private var wifiDrain: Double
+        get() = prefs.getDouble("nwwifi", 25.0)
+        set(v) = prefs.edit().putDouble("nwwifi", v).apply()
+
+    private var cell4GDrain: Double
+        get() = prefs.getDouble("nw4g", 50.0)
+        set(v) = prefs.edit().putDouble("nw4g", v).apply()
+
+    private var cell5GDrain: Double
+        get() = prefs.getDouble("nw5g", 80.0)
+        set(v) = prefs.edit().putDouble("nw5g", v).apply()
+
+    private var brightness100: Double
+        get() = prefs.getDouble("bright100", 180.0)
+        set(v) = prefs.edit().putDouble("bright100", v).apply()
+
+    private var emaMultiplier: Double
+        get() = prefs.getDouble("emaMult", 1.0)
+        set(v) = prefs.edit().putDouble("emaMult", v).apply()
+
+    private val alpha = 0.12
+
+    fun predictHoursRemaining(
+        batteryPercent: Int,
+        brightnessPercent: Int,
+        gpsHighMode: Boolean,
+        networkType: NetworkType,
+        cpuBusy: Boolean
+    ): Double {
+        var drain = baseDrain
+        drain += if (gpsHighMode) gpsHigh else gpsLow
+        drain += when (networkType) {
+            NetworkType.WIFI -> wifiDrain
+            NetworkType.CELL_4G -> cell4GDrain
+            NetworkType.CELL_5G -> cell5GDrain
+            NetworkType.UNKNOWN -> 40.0
+        }
+        drain += brightness100 * (brightnessPercent / 100.0)
+        if (cpuBusy) drain += 60.0
+        drain *= emaMultiplier
+        drain = max(60.0, min(drain, 900.0))
+        val drainPercentPerHour = drainToPercentPerHour(drain)
+        return if (drainPercentPerHour <= 0.1) 100.0 else batteryPercent / drainPercentPerHour
+    }
+
+    fun predictOptimizedHours(
+        batteryPercent: Int,
+        brightnessPercent: Int,
+        gpsHighMode: Boolean,
+        networkType: NetworkType,
+        cpuBusy: Boolean
+    ): Double {
+        val dimmedBrightness = max(0, brightnessPercent - 20)
+        return predictHoursRemaining(batteryPercent, dimmedBrightness, gpsHighMode, networkType, cpuBusy)
+    }
+
+    fun applyCalibration(predictedDropPercent: Double, actualDropPercent: Double) {
+        if (predictedDropPercent <= 0.05 || actualDropPercent <= 0.0) return
+        val ratio = actualDropPercent / predictedDropPercent
+        val newMult = emaMultiplier * (1 - alpha) + ratio * alpha
+        emaMultiplier = min(2.5, max(0.4, newMult))
+    }
+
+    private fun drainToPercentPerHour(mAh: Double, nominalCapacity: Double = 4000.0): Double {
+        return (mAh / nominalCapacity) * 100.0
+    }
+
+    private fun SharedPreferences.getDouble(key: String, def: Double): Double =
+        java.lang.Double.longBitsToDouble(getLong(key, java.lang.Double.doubleToLongBits(def)))
+
+    private fun SharedPreferences.Editor.putDouble(key: String, value: Double): SharedPreferences.Editor =
+        putLong(key, java.lang.Double.doubleToLongBits(value))
+}
+BATTERY TELEMETRY CODE : 
+package com.example.boostai
+
+import android.annotation.SuppressLint
+import android.app.Service
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.BatteryManager
+import android.os.Build
+import android.os.Handler
+import android.os.IBinder
+import android.os.Looper
+import android.util.Log
+import kotlin.math.min
+
+class BatteryTelemetryService : Service() {
+
+    companion object {
+        const val ACTION_BATTERY_TWIN_UPDATE = "com.example.boostai.BATTERY_TWIN_UPDATE"
+        const val EXTRA_ESTIMATED = "extra_estimated"
+        const val EXTRA_OPTIMIZED = "extra_optimized"
+    }
+
+    private val handler = Handler(Looper.getMainLooper())
+    private val updateInterval: Long = 60000L
+
+    private var currentLux: Float = 0f
+    private var currentGpsMode: String = "UNKNOWN"
+
+    private lateinit var predictor: BatteryPredictor
+
+    private val luxReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            currentLux = intent.getFloatExtra("currentLux", 0f)
+        }
+    }
+
+    private val gpsReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            currentGpsMode = intent.getStringExtra("gpsMode") ?: "UNKNOWN"
+        }
+    }
+
+    private val updateTask = object : Runnable {
+        override fun run() {
+            sendBatteryUpdate()
+            handler.postDelayed(this, updateInterval)
+        }
+    }
+
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
+    override fun onCreate() {
+        super.onCreate()
+        predictor = BatteryPredictor(this)
+
+        val luxFilter = IntentFilter("com.example.boostai.LUX_UPDATE")
+        val gpsFilter = IntentFilter("com.example.boostai.GPS_MODE_UPDATE")
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            // Convert to String to avoid receiver exported errors
+            registerReceiver(luxReceiver, luxFilter, Context.RECEIVER_NOT_EXPORTED.toString(), null)
+            registerReceiver(gpsReceiver, gpsFilter, Context.RECEIVER_NOT_EXPORTED.toString(), null)
+        } else {
+            @Suppress("DEPRECATION")
+            registerReceiver(luxReceiver, luxFilter)
+            @Suppress("DEPRECATION")
+            registerReceiver(gpsReceiver, gpsFilter)
+        }
+
+        handler.post(updateTask)
+        Log.d("BatteryTelemetryService", "Service started")
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        handler.removeCallbacks(updateTask)
+        unregisterReceiver(luxReceiver)
+        unregisterReceiver(gpsReceiver)
+        Log.d("BatteryTelemetryService", "Service stopped")
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun sendBatteryUpdate() {
+        val bm = getSystemService(BATTERY_SERVICE) as BatteryManager
+        val batteryLevel = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+
+        val gpsHighMode = currentGpsMode == "HIGH"
+        val brightness = min(100, (currentLux / 10).toInt())
+
+        // Use your BatteryPredictor with proper types
+        val estimatedHours = predictor.predictHoursRemaining(
+            batteryLevel,
+            brightness,
+            gpsHighMode,
+            networkType = NetworkType.UNKNOWN,
+            cpuBusy = false
+        )
+
+        val optimizedHours = predictor.predictOptimizedHours(
+            batteryLevel,
+            brightness,
+            gpsHighMode,
+            networkType = NetworkType.UNKNOWN,
+            cpuBusy = false
+        )
+
+        val intent = Intent(ACTION_BATTERY_TWIN_UPDATE).apply {
+            putExtra(EXTRA_ESTIMATED, "${estimatedHours.toInt()} mins")
+            putExtra(EXTRA_OPTIMIZED, "${optimizedHours.toInt()} mins")
+        }
+        sendBroadcast(intent)
+
+        Log.d(
+            "BatteryTelemetryService",
+            "Broadcast sent: Battery=$batteryLevel%, Lux=$currentLux, GPS=$currentGpsMode, " +
+                    "Estimated=${estimatedHours.toInt()} mins, Optimized=${optimizedHours.toInt()} mins"
+        )
+    }
+}
+BOOST SERVICE CODE : 
+package com.example.boostai
+
+import android.app.*
+import android.content.Context
+import android.content.Intent
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.os.*
+import android.provider.Settings
+import androidx.core.app.NotificationCompat
+import android.app.usage.UsageStatsManager
+import android.app.usage.UsageStats
+
+class BoostService : Service(), SensorEventListener {
+
+    private lateinit var sensorManager: SensorManager
+    private var lightSensor: Sensor? = null
+    private var currentLux: Float = 0f
+    private var currentBrightnessPercent: Int = 0
+    private var handler: Handler = Handler(Looper.getMainLooper())
+    private var isRunning = false
+
+    private val checkMapsRunnable = object : Runnable {
+        override fun run() {
+            val mapsRunning = isMapsRunning()
+            if (mapsRunning && !isRunning) {
+                startBrightnessMonitoring()
+            } else if (!mapsRunning && isRunning) {
+                stopBrightnessMonitoring()
+            }
+            handler.postDelayed(this, 1000) // Check every second
+        }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        lightSensor = sensorManager.getDefaultSensor(Sensor.TYPE_LIGHT)
+        handler.post(checkMapsRunnable)
+    }
+
+    private fun isMapsRunning(): Boolean {
+        val usm = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+        val time = System.currentTimeMillis()
+        val appList = usm.queryUsageStats(
+            UsageStatsManager.INTERVAL_DAILY,
+            time - 2000,
+            time
+        )
+        if (appList.isNullOrEmpty()) return false
+        val recentApp = appList.maxByOrNull { it.lastTimeUsed }
+        return recentApp?.packageName == "com.google.android.apps.maps"
+    }
+
+    private fun startBrightnessMonitoring() {
+        isRunning = true
+        lightSensor?.also {
+            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL)
+        }
+        startForeground(
+            1,
+            createNotification("Boost AI active",
+                "Lux: $currentLux | Brightness: $currentBrightnessPercent%")
+        )
+    }
+
+    private fun stopBrightnessMonitoring() {
+        isRunning = false
+        sensorManager.unregisterListener(this)
+        stopForeground(true)
+    }
+
+    private fun updateBrightness(lux: Float) {
+        val brightness = when {
+            lux == 0f -> 0.05f // ✅ 5% when lux = 0
+            lux < 10 ->  0.05f
+            lux < 100 -> 0.12f // 12%
+            lux in 100f..399f -> 0.25f // 25%
+            lux in 400f..999f -> 0.50f // 50%
+            else -> 0.85f // 85%
+        }
+        currentBrightnessPercent = (brightness * 100).toInt()
+        try {
+            if (Settings.System.canWrite(this)) {
+                val value = (brightness * 255).toInt()
+                Settings.System.putInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS,
+                    value
+                )
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    // ✅ Notification builder (fixed with API check)
+    private fun createNotification(title: String, content: String): Notification {
+        val channelId = "boost_ai_channel"
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                channelId,
+                "Boost AI",
+                NotificationManager.IMPORTANCE_LOW
+            )
+            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            manager.createNotificationChannel(channel)
+        }
+
+        return NotificationCompat.Builder(this, channelId)
+            .setContentTitle(title)
+            .setContentText(content)
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setOngoing(true)
+            .build()
+    }
+
+    override fun onSensorChanged(event: SensorEvent?) {
+        if (event?.sensor?.type == Sensor.TYPE_LIGHT) {
+            currentLux = event.values[0]
+            updateBrightness(currentLux)
+
+            val notification = createNotification(
+                "Boost AI active",
+                "Lux: ${currentLux.toInt()} | Brightness: $currentBrightnessPercent%"
+            )
+            (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+                .notify(1, notification)
+        }
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+
+    override fun onBind(intent: Intent?) = null
+
+    override fun onDestroy() {
+        super.onDestroy()
+        handler.removeCallbacks(checkMapsRunnable)
+        stopBrightnessMonitoring()
+    }
+}
